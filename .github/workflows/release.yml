@@ -1,0 +1,90 @@
+name: Выпуск обновления
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Номер версии, например 1.0.1 (каждый раз больше предыдущего)"
+        required: true
+      notes:
+        description: "Что нового (этот текст увидят пользователи в окне обновления)"
+        required: false
+        default: "Улучшения и исправления"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ inputs.version }}
+      NOTES: ${{ inputs.notes }}
+      KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+      KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+      KEY_ALIAS: studymate
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Скачать проект
+        uses: actions/checkout@v4
+
+      - name: Проверить номер версии и ключ подписи
+        run: |
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Версия должна быть в формате 1.0.1 (три числа через точки). Вы ввели: $VERSION"
+            exit 1
+          fi
+          if [ -z "$KEYSTORE_BASE64" ] || [ -z "$KEYSTORE_PASSWORD" ]; then
+            echo "::error::Не добавлены секреты KEYSTORE_BASE64 и KEYSTORE_PASSWORD. См. инструкцию, шаг 4."
+            exit 1
+          fi
+          IFS=. read -r MA MI PA <<< "$VERSION"
+          echo "VERSION_CODE=$((10#$MA * 10000 + 10#$MI * 100 + 10#$PA))" >> "$GITHUB_ENV"
+
+      - name: Установить Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Установить Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+
+      - name: Подготовить ключ подписи
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          echo "KEYSTORE_PATH=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+
+      - name: Собрать подписанный APK
+        run: >
+          gradle assembleRelease --no-daemon
+          -PappVersionName="$VERSION"
+          -PappVersionCode="$VERSION_CODE"
+          -PupdateRepo="${{ github.repository }}"
+
+      - name: Проверить подпись и подготовить файлы релиза
+        run: |
+          APK=app/build/outputs/apk/release/app-release.apk
+          test -f "$APK" || { echo "::error::APK не собрался (возможно, ключ подписи не подошёл)"; exit 1; }
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+          "$APKSIGNER" verify --print-certs "$APK"
+          mkdir -p out
+          cp "$APK" out/StudyMate.apk
+          SHA=$(sha256sum out/StudyMate.apk | cut -d' ' -f1)
+          jq -n \
+            --argjson code "$VERSION_CODE" \
+            --arg name "$VERSION" \
+            --arg notes "$NOTES" \
+            --arg sha "$SHA" \
+            '{versionCode: $code, versionName: $name, notes: $notes, sha256: $sha}' > out/update.json
+          cat out/update.json
+
+      - name: Опубликовать релиз
+        run: >
+          gh release create "v$VERSION" out/StudyMate.apk out/update.json
+          --repo "${{ github.repository }}"
+          --title "StudyMate $VERSION"
+          --notes "$NOTES"
+          --latest
