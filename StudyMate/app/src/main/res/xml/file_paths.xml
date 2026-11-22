@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- PDF, которые приложение открывает после сохранения (Android 9 и старше) -->
+    <cache-path name="pdf" path="pdf/" />
+    <!-- скачанные обновления -->
+    <cache-path name="updates" path="updates/" />
+</paths>
